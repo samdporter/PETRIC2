@@ -34,7 +34,11 @@ class MaxIteration(callbacks.Callback):
 
 
 class MyPreconditioner(Preconditioner):
-    """Lehmer-mean preconditioner combining prior, EM, and optional data Hessian diagonals."""
+    """Lehmer-mean preconditioner combining prior, EM, and optional data Hessian diagonals.
+
+    The diagonal is assembled once at initialisation and stays fixed; all
+    subsequent curvature refinement is handled by the lazy L-BFGS memory.
+    """
 
     def __init__(
         self,
