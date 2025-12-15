@@ -84,7 +84,10 @@ class MyPreconditioner(Preconditioner):
                 sens = f.get_subset_sensitivity(0)
             except Exception:
                 continue
-            sensitivity = sens.clone() if sensitivity is None else sensitivity + sens
+            if sensitivity is None:
+                sensitivity = sens.clone()
+            else:
+                sensitivity += sens
         if sensitivity is None:
             return None
         return sensitivity + eps
@@ -99,7 +102,10 @@ class MyPreconditioner(Preconditioner):
                 hess_vec = f.multiply_with_Hessian(ref_image, ones)
             except Exception:
                 continue
-            diag = hess_vec.clone() if diag is None else diag + hess_vec
+            if diag is None:
+                diag = hess_vec.clone()
+            else:
+                diag += hess_vec
         if diag is None:
             return None
         diag *= 1.0 / len(obj_funs)
@@ -137,13 +143,14 @@ class LazyStochasticLBFGSB(Algorithm):
         super().__init__()
         self.x = initial.clone()
         self.obj_funs = list(obj_funs)
+        self.n_obj = len(self.obj_funs)
         self.mode = mode.upper()
         self.step_size0 = step_size
         self.decay = decay
         self.memory = memory
-        self.lazy_interval = lazy_interval or len(self.obj_funs)
+        self.lazy_interval = lazy_interval or self.n_obj
         self.preconditioner = preconditioner
-        self.sampler = sampler or Sampler.random_without_replacement(len(self.obj_funs))
+        self.sampler = sampler or Sampler.random_without_replacement(self.n_obj)
         self.update_objective_interval = update_objective_interval
         self.max_iteration = 0
         self.g = g if g is not None else IndicatorBox(lower=0, accelerated=False)
@@ -177,14 +184,16 @@ class LazyStochasticLBFGSB(Algorithm):
         self.mu = self._mean_gradients(self.snapshot_grads)
 
     def _mean_gradients(self, grads: Iterable):
-        total = None
-        for g in grads:
-            total = g.clone() if total is None else total + g
-        return total * (1.0 / len(self.obj_funs))
+        grads = list(grads)
+        if not grads:
+            return None
+        total = grads[0].clone()
+        for g in grads[1:]:
+            total += g
+        return total * (1.0 / self.n_obj)
 
     def _current_global_grad(self):
-        grads = [f.gradient(self.x) for f in self.obj_funs]
-        return self._mean_gradients(grads)
+        return self._mean_gradients(f.gradient(self.x) for f in self.obj_funs)
 
     # ---- core algorithm ----
     def step_size(self):
@@ -200,10 +209,10 @@ class LazyStochasticLBFGSB(Algorithm):
     def _stochastic_gradient(self, idx):
         if self.mode == "SAGA":
             grad_i = self.obj_funs[idx].gradient(self.x)
-            estimator = grad_i - self.stored_grads[idx] + self.mean_grad
-            # update table
-            self.mean_grad += (grad_i - self.stored_grads[idx]) * (1.0 / len(self.obj_funs))
-            self.stored_grads[idx] = grad_i.clone()
+            prev_stored = self.stored_grads[idx]
+            estimator = grad_i - prev_stored + self.mean_grad
+            self.mean_grad += (grad_i - prev_stored) * (1.0 / self.n_obj)
+            self.stored_grads[idx] = grad_i if hasattr(grad_i, "clone") else grad_i
             return estimator
         # SVRG
         grad_i = self.obj_funs[idx].gradient(self.x)
