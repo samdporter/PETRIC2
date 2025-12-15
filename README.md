@@ -121,5 +121,24 @@ See the [wiki/Home][wiki] and [wiki/FAQ](https://github.com/SyneRBI/PETRIC2/wiki
 
 Any modifications to `petric.py` are ignored.
 
+## Lazy stochastic L-BFGS-B submission
+
+This submission replaces the reference ISTA example with a custom lazy stochastic L-BFGS-B solver designed for noisy subset gradients.
+
+### Algorithm outline
+- **Stochastic gradients**: supports both **SAGA** (table of stored subset gradients with bias correction) and **SVRG** (periodic full-snapshot correction) modes built on the partitioned objective terms produced by `sirf.contrib.partitioner`.
+- **Non-negativity constraint**: updates are projected onto the positive orthant; an `IndicatorBox` is retained for compatibility.
+- **CIL compatibility**: the projection uses `IndicatorBox.proximal`, so the solver stays within the standard CIL `Function`/`Algorithm` contract without reimplementing proximal steps.
+- **Lazy L-BFGS updates**: the two-loop recursion runs every iteration, but `(s, y)` curvature pairs are only appended at the end of each epoch (`lazy_interval`). Curvature is computed from global mean gradients/snapshots to reduce subset noise.
+- **Step size**: constant or polynomially decaying step size, avoiding Wolfe line searches that are unstable under stochastic gradients.
+- **Subset scheduling**: sampling follows the provided `Sampler.random_without_replacement`, ensuring each subset is visited per epoch while keeping CIL `DataContainer` operations throughout.
+
+### Preconditioning strategy
+- The initial inverse Hessian approximation is diagonal and derived from domain information.
+- A **Lehmer (contraharmonic) mean** combines the prior RDP curvature diagonal (`data.kappa`) with an EM-style sensitivity estimate; optional data-term mixing is supported.
+- The preconditioner is applied inside the two-loop recursion to scale the search direction without leaving the CIL algebra.
+
+These components are implemented in `main.py` within `LazyStochasticLBFGSB` and are wired into `Submission` so that the challenge harness can call `Submission(data).run(...)` as before.
+
 [wiki]: https://github.com/SyneRBI/PETRIC2/wiki
 [leaderboard]: https://petric.tomography.stfc.ac.uk/2/leaderboard/?smoothing=0#timeseries&_smoothingWeight=0
