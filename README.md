@@ -136,6 +136,7 @@ This submission replaces the reference ISTA example with a custom lazy stochasti
 ### Preconditioning strategy
 - The initial inverse Hessian approximation is diagonal and derived from domain information.
 - A **Lehmer (contraharmonic) mean** combines the prior RDP curvature diagonal (`data.kappa`) with an EM-style sensitivity estimate; optional data-term mixing is supported.
+- The EM component is built from STIR subset sensitivities (`get_subset_sensitivity`), while the prior/data diagonals use `multiply_with_Hessian` on a uniform vector to capture the Hessian row sums when available.
 - The preconditioner is applied inside the two-loop recursion to scale the search direction without leaving the CIL algebra.
 
 These components are implemented in `main.py` within `LazyStochasticLBFGSB` and are wired into `Submission` so that the challenge harness can call `Submission(data).run(...)` as before.

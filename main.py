@@ -34,19 +34,29 @@ class MaxIteration(callbacks.Callback):
 
 
 class MyPreconditioner(Preconditioner):
-    """Lehmer-mean preconditioner combining prior and EM diagonals."""
+    """Lehmer-mean preconditioner combining prior, EM, and optional data Hessian diagonals."""
 
-    def __init__(self, d_prior, d_em=None, d_data=None, p: float = 2.0, mix_data: bool = False, epsilon: float = 1e-6):
-        # fall back to prior if EM estimate missing
-        self.d_prior = d_prior
-        self.d_em = d_em if d_em is not None else d_prior.clone()
-        self.d_data = d_data
+    def __init__(
+        self,
+        kappa,
+        prior=None,
+        obj_funs: Sequence | None = None,
+        ref_image=None,
+        p: float = 2.0,
+        mix_data: bool = False,
+        epsilon: float = 1e-6,
+    ):
         self.p = p
         self.epsilon = epsilon
+        self.d_prior = self._compute_prior_diag(kappa, prior, ref_image, epsilon)
+        self.d_em = self._compute_em_diag(obj_funs, epsilon)
+        if self.d_em is None:
+            self.d_em = self.d_prior.clone() if hasattr(self.d_prior, "clone") else self.d_prior
+        self.d_data = self._compute_data_diag(obj_funs, ref_image, epsilon) if mix_data else None
+
         base_mean = self._lehmer_mean(self.d_prior, self.d_em, p=p, eps=epsilon)
-        if mix_data and d_data is not None:
-            base_mean = 0.5 * base_mean + 0.5 * d_data
-        # avoid division by zero in apply
+        if mix_data and self.d_data is not None:
+            base_mean = 0.5 * base_mean + 0.5 * self.d_data
         self.diag = base_mean + epsilon
 
     @staticmethod
@@ -54,6 +64,46 @@ class MyPreconditioner(Preconditioner):
         numerator = (x ** (p - 1)) + (y ** (p - 1))
         denominator = (x ** p) + (y ** p) + eps
         return numerator / denominator
+
+    def _compute_prior_diag(self, kappa, prior, ref_image, eps):
+        if prior is not None and ref_image is not None:
+            try:
+                ones = ref_image.get_uniform_copy(1.0)
+                return prior.multiply_with_Hessian(ref_image, ones)
+            except Exception:
+                pass
+        # fallback to kappa^2
+        return kappa * kappa + eps
+
+    def _compute_em_diag(self, obj_funs: Sequence | None, eps):
+        if not obj_funs:
+            return None
+        sensitivity = None
+        for f in obj_funs:
+            try:
+                sens = f.get_subset_sensitivity(0)
+            except Exception:
+                continue
+            sensitivity = sens.clone() if sensitivity is None else sensitivity + sens
+        if sensitivity is None:
+            return None
+        return sensitivity + eps
+
+    def _compute_data_diag(self, obj_funs: Sequence | None, ref_image, eps):
+        if not obj_funs or ref_image is None:
+            return None
+        diag = None
+        ones = ref_image.get_uniform_copy(1.0)
+        for f in obj_funs:
+            try:
+                hess_vec = f.multiply_with_Hessian(ref_image, ones)
+            except Exception:
+                continue
+            diag = hess_vec.clone() if diag is None else diag + hess_vec
+        if diag is None:
+            return None
+        diag *= 1.0 / len(obj_funs)
+        return diag + eps
 
     def apply(self, algorithm, gradient, out=None):
         return gradient.divide(self.diag, out=out)
@@ -253,7 +303,8 @@ class Submission(LazyStochasticLBFGSB):
     """Lazy stochastic quasi-Newton solver with non-negativity constraints."""
 
     def __init__(self, data: Dataset, num_subsets: int = 7, step_size: float = 0.1, update_objective_interval: int = 10,
-                 mode: str = "SAGA", decay: float = 0.0, lazy_interval: int | None = None, memory: int = 5):
+                 mode: str = "SAGA", decay: float = 0.0, lazy_interval: int | None = None, memory: int = 5,
+                 mix_data_preconditioner: bool = True):
         data_sub, acq_models, obj_funs = partitioner.data_partition(
             data.acquired_data, data.additive_term, data.mult_factors, num_subsets, mode='staggered',
             initial_image=data.OSEM_image)
@@ -262,10 +313,18 @@ class Submission(LazyStochasticLBFGSB):
         for f in obj_funs:
             f.set_prior(data.prior)
 
+        obj_funs_for_precond = list(obj_funs)
+
         # Use the same sign convention as the reference ISTA implementation (maximisation rewritten as minimisation)
         obj_funs = [(-1) * f for f in obj_funs]
         sampler = Sampler.random_without_replacement(len(obj_funs))
-        preconditioner = MyPreconditioner(data.kappa)
+        preconditioner = MyPreconditioner(
+            kappa=data.kappa,
+            prior=data.prior,
+            obj_funs=obj_funs_for_precond,
+            ref_image=data.OSEM_image,
+            mix_data=mix_data_preconditioner,
+        )
         super().__init__(
             initial=data.OSEM_image,
             obj_funs=obj_funs,
